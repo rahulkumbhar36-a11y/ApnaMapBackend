@@ -99,3 +99,60 @@ async def get_route(data: RouteRequest):
             status_code=502,
             detail="Internet ya route service check karo"
         )
+        @app.get("/nearby-shops")
+async def nearby_shops(lat: float, lng: float):
+    query = f"""
+    [out:json][timeout:20];
+    (
+      node(around:1500,{lat},{lng})["shop"];
+      way(around:1500,{lat},{lng})["shop"];
+      node(around:1500,{lat},{lng})["amenity"="pharmacy"];
+      node(around:1500,{lat},{lng})["amenity"="restaurant"];
+      node(around:1500,{lat},{lng})["amenity"="hospital"];
+      node(around:1500,{lat},{lng})["amenity"="fuel"];
+      node(around:1500,{lat},{lng})["amenity"="atm"];
+    );
+    out center tags;
+    """
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=35,
+            headers={"User-Agent": "ApnaMapIndia/1.0"}
+        ) as client:
+            response = await client.post(
+                "https://overpass.private.coffee/api/interpreter",
+                data={"data": query}
+            )
+            response.raise_for_status()
+
+        elements = response.json().get("elements", [])
+        places = []
+
+        for item in elements:
+            tags = item.get("tags", {})
+            center = item.get("center", {})
+
+            place_lat = item.get("lat", center.get("lat"))
+            place_lng = item.get("lon", center.get("lon"))
+
+            if place_lat is None or place_lng is None:
+                continue
+
+            places.append({
+                "name": tags.get(
+                    "name",
+                    tags.get("shop", tags.get("amenity", "Nearby place"))
+                ),
+                "latitude": place_lat,
+                "longitude": place_lng,
+                "category": tags.get("shop", tags.get("amenity", "place"))
+            })
+
+        return {"places": places}
+
+    except httpx.HTTPError:
+        raise HTTPException(
+            status_code=502,
+            detail="Nearby places service busy hai. Thodi der baad try karo."
+        )
