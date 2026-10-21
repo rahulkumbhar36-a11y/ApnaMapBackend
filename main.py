@@ -6,7 +6,7 @@ import httpx
 app = FastAPI(title="Apna Map India Navigation")
 
 OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
-OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"
+OVERPASS_URL = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 
 
 class RouteRequest(BaseModel):
