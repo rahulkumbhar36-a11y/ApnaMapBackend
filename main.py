@@ -1,3 +1,4 @@
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import httpx
@@ -5,6 +6,7 @@ import httpx
 app = FastAPI(title="Apna Map India Navigation")
 
 OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
+OVERPASS_URL = "https://overpass.private.coffee/api/interpreter"
 
 
 class RouteRequest(BaseModel):
@@ -21,6 +23,9 @@ def home():
     }
 
 
+# =====================================
+# 1. ROUTE / NAVIGATION API
+# =====================================
 @app.post("/route")
 async def get_route(data: RouteRequest):
     url = (
@@ -39,12 +44,7 @@ async def get_route(data: RouteRequest):
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url, params=params)
-
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=502,
-                detail="Route service request failed"
-            )
+            response.raise_for_status()
 
         result = response.json()
 
@@ -65,20 +65,20 @@ async def get_route(data: RouteRequest):
                 road_name = step.get("name") or "aage ka raasta"
 
                 if instruction_type == "depart":
-                    text = f"{road_name} par aage badhein"
+                    instruction_text = f"{road_name} par aage badhein"
                 elif instruction_type == "arrive":
-                    text = "Aap apni manzil par pahunch gaye"
+                    instruction_text = "Aap apni manzil par pahunch gaye"
                 elif instruction_type == "turn":
-                    text = f"{modifier or 'aage'} mudein"
+                    instruction_text = f"{modifier or 'aage'} mudein"
                 elif instruction_type == "roundabout":
-                    text = "Roundabout mein aage badhein"
+                    instruction_text = "Roundabout mein aage badhein"
                 elif instruction_type == "continue":
-                    text = f"{road_name} par seedhe chalein"
+                    instruction_text = f"{road_name} par seedhe chalein"
                 else:
-                    text = f"{road_name} par aage badhein"
+                    instruction_text = f"{road_name} par aage badhein"
 
                 instructions.append({
-                    "instruction": text,
+                    "instruction": instruction_text,
                     "road_name": road_name,
                     "distance_meters": step.get("distance", 0),
                     "duration_seconds": step.get("duration", 0),
@@ -99,18 +99,34 @@ async def get_route(data: RouteRequest):
             status_code=502,
             detail="Internet ya route service check karo"
         )
-        @app.get("/nearby-shops")
+
+
+# =====================================
+# 2. NEARBY SHOPS / PLACES API
+# =====================================
+@app.get("/nearby-shops")
 async def nearby_shops(lat: float, lng: float):
+    # Search within 1500 metres of the user's location.
     query = f"""
     [out:json][timeout:20];
     (
       node(around:1500,{lat},{lng})["shop"];
       way(around:1500,{lat},{lng})["shop"];
+
       node(around:1500,{lat},{lng})["amenity"="pharmacy"];
+      way(around:1500,{lat},{lng})["amenity"="pharmacy"];
+
       node(around:1500,{lat},{lng})["amenity"="restaurant"];
+      way(around:1500,{lat},{lng})["amenity"="restaurant"];
+
       node(around:1500,{lat},{lng})["amenity"="hospital"];
+      way(around:1500,{lat},{lng})["amenity"="hospital"];
+
       node(around:1500,{lat},{lng})["amenity"="fuel"];
+      way(around:1500,{lat},{lng})["amenity"="fuel"];
+
       node(around:1500,{lat},{lng})["amenity"="atm"];
+      way(around:1500,{lat},{lng})["amenity"="atm"];
     );
     out center tags;
     """
@@ -121,7 +137,7 @@ async def nearby_shops(lat: float, lng: float):
             headers={"User-Agent": "ApnaMapIndia/1.0"}
         ) as client:
             response = await client.post(
-                "https://overpass.private.coffee/api/interpreter",
+                OVERPASS_URL,
                 data={"data": query}
             )
             response.raise_for_status()
@@ -142,17 +158,26 @@ async def nearby_shops(lat: float, lng: float):
             places.append({
                 "name": tags.get(
                     "name",
-                    tags.get("shop", tags.get("amenity", "Nearby place"))
+                    tags.get(
+                        "shop",
+                        tags.get("amenity", "Nearby place")
+                    )
                 ),
                 "latitude": place_lat,
                 "longitude": place_lng,
-                "category": tags.get("shop", tags.get("amenity", "place"))
+                "category": tags.get(
+                    "shop",
+                    tags.get("amenity", "place")
+                )
             })
 
         return {"places": places}
 
-    except httpx.HTTPError:
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError):
         raise HTTPException(
             status_code=502,
-            detail="Nearby places service busy hai. Thodi der baad try karo."
-        )
+            detail="Nearby places service busy hai. Baad mein try karo."
+    )
+        
