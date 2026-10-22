@@ -108,6 +108,53 @@ async def get_route(data: RouteRequest):
 # =====================================
 # 2. NEARBY SHOPS / PLACES API
 # =====================================
+# =====================================
+# DESTINATION SEARCH API
+# =====================================
+@app.get("/search-place")
+async def search_place(q: str):
+    q = q.strip()
+
+    if not q:
+        raise HTTPException(
+            status_code=400,
+            detail="Destination ka naam likho"
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=15,
+            headers={"User-Agent": "ApnaMapIndia/1.0"}
+        ) as client:
+            response = await client.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={
+                    "q": q,
+                    "format": "jsonv2",
+                    "limit": 1
+                }
+            )
+            response.raise_for_status()
+            results = response.json()
+
+        if not results:
+            return {"places": []}
+
+        place = results[0]
+
+        return {
+            "places": [{
+                "name": place.get("display_name", q),
+                "latitude": float(place["lat"]),
+                "longitude": float(place["lon"])
+            }]
+        }
+
+    except (httpx.HTTPError, ValueError, KeyError):
+        raise HTTPException(
+            status_code=502,
+            detail="Destination search service busy hai"
+        )
 @app.get("/nearby-shops")
 async def nearby_shops(lat: float, lng: float):
     # Search within 1500 metres.
