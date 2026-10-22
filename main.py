@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import httpx
@@ -6,7 +5,12 @@ import httpx
 app = FastAPI(title="Apna Map India Navigation")
 
 OSRM_URL = "https://router.project-osrm.org/route/v1/driving"
-OVERPASS_URL = "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
+
+OVERPASS_SERVERS = [
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+]
 
 
 class RouteRequest(BaseModel):
@@ -106,78 +110,68 @@ async def get_route(data: RouteRequest):
 # =====================================
 @app.get("/nearby-shops")
 async def nearby_shops(lat: float, lng: float):
-    # Search within 1500 metres of the user's location.
+    # Search within 1500 metres.
     query = f"""
     [out:json][timeout:20];
     (
-      node(around:1500,{lat},{lng})["shop"];
-      way(around:1500,{lat},{lng})["shop"];
-
-      node(around:1500,{lat},{lng})["amenity"="pharmacy"];
-      way(around:1500,{lat},{lng})["amenity"="pharmacy"];
-
-      node(around:1500,{lat},{lng})["amenity"="restaurant"];
-      way(around:1500,{lat},{lng})["amenity"="restaurant"];
-
-      node(around:1500,{lat},{lng})["amenity"="hospital"];
-      way(around:1500,{lat},{lng})["amenity"="hospital"];
-
-      node(around:1500,{lat},{lng})["amenity"="fuel"];
-      way(around:1500,{lat},{lng})["amenity"="fuel"];
-
-      node(around:1500,{lat},{lng})["amenity"="atm"];
-      way(around:1500,{lat},{lng})["amenity"="atm"];
+      nwr(around:1500,{lat},{lng})["shop"];
+      nwr(around:1500,{lat},{lng})
+        ["amenity"~"pharmacy|restaurant|hospital|fuel|atm"];
     );
     out center tags;
     """
 
-    try:
-        async with httpx.AsyncClient(
-            timeout=35,
-            headers={"User-Agent": "ApnaMapIndia/1.0"}
-        ) as client:
-            response = await client.post(
-                OVERPASS_URL,
-                data={"data": query}
-            )
-            response.raise_for_status()
+    last_error = None
 
-        elements = response.json().get("elements", [])
-        places = []
-
-        for item in elements:
-            tags = item.get("tags", {})
-            center = item.get("center", {})
-
-            place_lat = item.get("lat", center.get("lat"))
-            place_lng = item.get("lon", center.get("lon"))
-
-            if place_lat is None or place_lng is None:
-                continue
-
-            places.append({
-                "name": tags.get(
-                    "name",
-                    tags.get(
-                        "shop",
-                        tags.get("amenity", "Nearby place")
-                    )
-                ),
-                "latitude": place_lat,
-                "longitude": place_lng,
-                "category": tags.get(
-                    "shop",
-                    tags.get("amenity", "place")
+    for server in OVERPASS_SERVERS:
+        try:
+            async with httpx.AsyncClient(
+                timeout=35,
+                headers={"User-Agent": "ApnaMapIndia/1.0"}
+            ) as client:
+                response = await client.post(
+                    server,
+                    data={"data": query}
                 )
-            })
+                response.raise_for_status()
+                data = response.json()
 
-        return {"places": places}
+            elements = data.get("elements", [])
+            places = []
 
-    except HTTPException:
-        raise
-    except (httpx.HTTPError, ValueError):
-        raise HTTPException(
-            status_code=502,
-            detail="Nearby places service busy hai. Baad mein try karo."
+            for item in elements:
+                tags = item.get("tags", {})
+                center = item.get("center", {})
+
+                place_lat = item.get("lat", center.get("lat"))
+                place_lng = item.get("lon", center.get("lon"))
+
+                if place_lat is None or place_lng is None:
+                    continue
+
+                places.append({
+                    "name": tags.get(
+                        "name",
+                        tags.get(
+                            "shop",
+                            tags.get("amenity", "Nearby place")
+                        )
+                    ),
+                    "latitude": place_lat,
+                    "longitude": place_lng,
+                    "category": tags.get(
+                        "shop",
+                        tags.get("amenity", "place")
+                    )
+                })
+
+            return {"places": places}
+
+        except (httpx.HTTPError, ValueError) as error:
+            last_error = error
+            continue
+
+    raise HTTPException(
+        status_code=502,
+        detail="Nearby places servers busy hain. Dobara try karo."
     )
-        
