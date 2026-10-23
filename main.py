@@ -77,7 +77,7 @@ async def get_route(data: RouteRequest):
             "routes.duration,"
             "routes.polyline.encodedPolyline,"
             "routes.legs.steps.distanceMeters,"
-            "routes.legs.steps.duration,"
+            "routes.legs.steps.staticDuration,"
             "routes.legs.steps.navigationInstruction.instructions,"
             "routes.legs.steps.navigationInstruction.maneuver,"
             "routes.legs.steps.startLocation"
@@ -120,9 +120,9 @@ async def get_route(data: RouteRequest):
                     .get("latLng", {})
                 )
 
-                step_duration = float(
-                    str(step.get("duration", "0s")).rstrip("s")
-                )
+               step_duration = float(
+    str(step.get("staticDuration", "0s")).rstrip("s")
+)
 
                 instructions.append({
                     "instruction": instruction_text,
