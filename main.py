@@ -1,7 +1,6 @@
-
 import os
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
 app = FastAPI(title="Apna Map India Navigation")
@@ -29,10 +28,22 @@ def duration_seconds(value):
     return float(str(value or "0s").removesuffix("s") or 0)
 
 
+# =====================================
+# HOME
+# =====================================
 @app.get("/")
 def home():
     return {
-        "message": "Apna Map India Navigation Server is running"
+        "message": "Apna Map India Navigation Server is running",
+        "nearby_categories": [
+            "all",
+            "shops",
+            "hospital",
+            "atm",
+            "petrol_pump",
+            "restaurant",
+            "pharmacy",
+        ],
     }
 
 
@@ -148,9 +159,9 @@ async def get_route(data: RouteRequest):
             )
 
         route = routes[0]
-        polyline = route.get("polyline", {}).get(
-            "encodedPolyline"
-        )
+        polyline = route.get(
+            "polyline", {}
+        ).get("encodedPolyline")
 
         if not polyline:
             raise HTTPException(
@@ -158,7 +169,6 @@ async def get_route(data: RouteRequest):
                 detail="Google response mein route polyline nahi mila"
             )
 
-        # Convert Google's steps into a simple app-friendly list.
         instructions = []
 
         for leg in route.get("legs", []):
@@ -166,6 +176,7 @@ async def get_route(data: RouteRequest):
                 navigation = step.get(
                     "navigationInstruction", {}
                 )
+
                 start_location = step.get(
                     "startLocation", {}
                 ).get("latLng", {})
@@ -174,14 +185,14 @@ async def get_route(data: RouteRequest):
                     "instructions", ""
                 )
 
-                # Skip steps without instruction text.
                 if not instruction_text:
                     continue
 
                 instructions.append({
                     "instruction": instruction_text,
                     "maneuver": navigation.get(
-                        "maneuver", "MANEUVER_UNSPECIFIED"
+                        "maneuver",
+                        "MANEUVER_UNSPECIFIED"
                     ),
                     "distance_meters": step.get(
                         "distanceMeters", 0
@@ -189,6 +200,8 @@ async def get_route(data: RouteRequest):
                     "duration_seconds": duration_seconds(
                         step.get("staticDuration", "0s")
                     ),
+                    # Backend sends [longitude, latitude].
+                    # Android LatLng needs latitude first.
                     "location": [
                         start_location.get("longitude", 0),
                         start_location.get("latitude", 0)
@@ -196,7 +209,9 @@ async def get_route(data: RouteRequest):
                 })
 
         return {
-            "distance_meters": route.get("distanceMeters", 0),
+            "distance_meters": route.get(
+                "distanceMeters", 0
+            ),
             "duration_seconds": duration_seconds(
                 route.get("duration", "0s")
             ),
@@ -237,7 +252,9 @@ async def search_place(q: str):
     try:
         async with httpx.AsyncClient(
             timeout=15,
-            headers={"User-Agent": "ApnaMapIndia/1.0"}
+            headers={
+                "User-Agent": "ApnaMapIndia/1.0"
+            }
         ) as client:
             response = await client.get(
                 "https://nominatim.openstreetmap.org/search",
@@ -272,22 +289,82 @@ async def search_place(q: str):
 
 
 # =====================================
-# 3. NEARBY SHOPS / PLACES API
+# 3. NEARBY CATEGORY SEARCH
 # =====================================
+
+CATEGORY_FILTERS = {
+    "all": [
+        'nwr(around:{radius},{lat},{lng})["shop"];',
+        'nwr(around:{radius},{lat},{lng})'
+        '["amenity"~"pharmacy|restaurant|hospital|fuel|atm"];',
+    ],
+
+    "shops": [
+        'nwr(around:{radius},{lat},{lng})["shop"];',
+    ],
+
+    "hospital": [
+        'nwr(around:{radius},{lat},{lng})["amenity"="hospital"];',
+        'nwr(around:{radius},{lat},{lng})["healthcare"="hospital"];',
+    ],
+
+    "atm": [
+        'nwr(around:{radius},{lat},{lng})["amenity"="atm"];',
+    ],
+
+    "petrol_pump": [
+        'nwr(around:{radius},{lat},{lng})["amenity"="fuel"];',
+    ],
+
+    "restaurant": [
+        'nwr(around:{radius},{lat},{lng})'
+        '["amenity"~"restaurant|fast_food|cafe"];',
+    ],
+
+    "pharmacy": [
+        'nwr(around:{radius},{lat},{lng})["amenity"="pharmacy"];',
+        'nwr(around:{radius},{lat},{lng})["healthcare"="pharmacy"];',
+    ],
+}
+
+
 @app.get("/nearby-shops")
-async def nearby_shops(lat: float, lng: float):
+async def nearby_shops(
+    lat: float,
+    lng: float,
+    category: str = Query(default="all"),
+    radius: int = Query(default=1500, ge=100, le=10000)
+):
     if not (-90 <= lat <= 90 and -180 <= lng <= 180):
         raise HTTPException(
             status_code=400,
             detail="Latitude ya longitude galat hai"
         )
 
+    category = category.strip().lower()
+
+    if category not in CATEGORY_FILTERS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Unknown category",
+                "allowed_categories": list(CATEGORY_FILTERS.keys())
+            }
+        )
+
+    filter_lines = "\n      ".join(
+        item.format(
+            radius=radius,
+            lat=lat,
+            lng=lng
+        )
+        for item in CATEGORY_FILTERS[category]
+    )
+
     query = f"""
-    [out:json][timeout:20];
+    [out:json][timeout:25];
     (
-      nwr(around:1500,{lat},{lng})["shop"];
-      nwr(around:1500,{lat},{lng})
-        ["amenity"~"pharmacy|restaurant|hospital|fuel|atm"];
+      {filter_lines}
     );
     out center tags;
     """
@@ -296,7 +373,9 @@ async def nearby_shops(lat: float, lng: float):
         try:
             async with httpx.AsyncClient(
                 timeout=35,
-                headers={"User-Agent": "ApnaMapIndia/1.0"}
+                headers={
+                    "User-Agent": "ApnaMapIndia/1.0"
+                }
             ) as client:
                 response = await client.post(
                     server,
@@ -306,40 +385,65 @@ async def nearby_shops(lat: float, lng: float):
                 result = response.json()
 
             places = []
+            seen = set()
 
             for item in result.get("elements", []):
                 tags = item.get("tags", {})
                 center = item.get("center", {})
 
-                place_lat = item.get("lat", center.get("lat"))
-                place_lng = item.get("lon", center.get("lon"))
+                place_lat = item.get(
+                    "lat", center.get("lat")
+                )
+                place_lng = item.get(
+                    "lon", center.get("lon")
+                )
 
                 if place_lat is None or place_lng is None:
                     continue
 
+                unique_id = (
+                    item.get("type"),
+                    item.get("id")
+                )
+
+                if unique_id in seen:
+                    continue
+
+                seen.add(unique_id)
+
+                place_category = (
+                    tags.get("shop")
+                    or tags.get("amenity")
+                    or tags.get("healthcare")
+                    or "place"
+                )
+
                 places.append({
                     "name": tags.get(
                         "name",
-                        tags.get(
-                            "shop",
-                            tags.get("amenity", "Nearby place")
-                        )
+                        tags.get("brand", place_category)
                     ),
-                    "latitude": place_lat,
-                    "longitude": place_lng,
-                    "category": tags.get(
-                        "shop",
-                        tags.get("amenity", "place")
-                    )
+                    "latitude": float(place_lat),
+                    "longitude": float(place_lng),
+                    "category": place_category,
+                    "address": tags.get("addr:full", "")
                 })
 
-            return {"places": places}
+            return {
+                "category": category,
+                "radius_meters": radius,
+                "count": len(places),
+                "places": places
+            }
 
         except (httpx.HTTPError, ValueError) as error:
-            print("Nearby places server error:", str(error))
+            print(
+                "Nearby places server error:",
+                str(error)
+            )
             continue
 
     raise HTTPException(
         status_code=502,
         detail="Nearby places servers busy hain. Dobara try karo."
-)
+    )
