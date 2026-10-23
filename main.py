@@ -37,7 +37,7 @@ def home():
 
 
 # =====================================
-# 1. TRAFFIC-AWARE ROUTE API
+# 1. TRAFFIC-AWARE ROUTE + DIRECTIONS
 # =====================================
 @app.post("/route")
 async def get_route(data: RouteRequest):
@@ -49,7 +49,6 @@ async def get_route(data: RouteRequest):
             detail="GOOGLE_ROUTES_API_KEY Render mein set nahi hai"
         )
 
-    # Validate coordinates
     if not (
         -90 <= data.origin_lat <= 90
         and -180 <= data.origin_lng <= 180
@@ -82,20 +81,22 @@ async def get_route(data: RouteRequest):
         "routingPreference": "TRAFFIC_AWARE",
         "computeAlternativeRoutes": False,
         "polylineEncoding": "ENCODED_POLYLINE",
-        "languageCode": "en-US",
+        "languageCode": "hi-IN",
         "units": "METRIC"
     }
 
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
-
-        # Start with valid route-level fields only.
-        # Navigation fields can be added after this test works.
         "X-Goog-FieldMask": (
             "routes.distanceMeters,"
             "routes.duration,"
-            "routes.polyline.encodedPolyline"
+            "routes.polyline.encodedPolyline,"
+            "routes.legs.steps.distanceMeters,"
+            "routes.legs.steps.staticDuration,"
+            "routes.legs.steps.navigationInstruction.instructions,"
+            "routes.legs.steps.navigationInstruction.maneuver,"
+            "routes.legs.steps.startLocation.latLng"
         )
     }
 
@@ -108,7 +109,6 @@ async def get_route(data: RouteRequest):
             )
 
         if response.is_error:
-            # Print Google's error, but never print the API key.
             print(
                 "Google Routes API error:",
                 response.status_code,
@@ -120,7 +120,7 @@ async def get_route(data: RouteRequest):
                     status_code=502,
                     detail=(
                         "Google Routes request invalid hai. "
-                        "Render Logs mein Google error dekho."
+                        "Render Logs mein Google error check karo."
                     )
                 )
 
@@ -158,15 +158,50 @@ async def get_route(data: RouteRequest):
                 detail="Google response mein route polyline nahi mila"
             )
 
+        # Convert Google's steps into a simple app-friendly list.
+        instructions = []
+
+        for leg in route.get("legs", []):
+            for step in leg.get("steps", []):
+                navigation = step.get(
+                    "navigationInstruction", {}
+                )
+                start_location = step.get(
+                    "startLocation", {}
+                ).get("latLng", {})
+
+                instruction_text = navigation.get(
+                    "instructions", ""
+                )
+
+                # Skip steps without instruction text.
+                if not instruction_text:
+                    continue
+
+                instructions.append({
+                    "instruction": instruction_text,
+                    "maneuver": navigation.get(
+                        "maneuver", "MANEUVER_UNSPECIFIED"
+                    ),
+                    "distance_meters": step.get(
+                        "distanceMeters", 0
+                    ),
+                    "duration_seconds": duration_seconds(
+                        step.get("staticDuration", "0s")
+                    ),
+                    "location": [
+                        start_location.get("longitude", 0),
+                        start_location.get("latitude", 0)
+                    ]
+                })
+
         return {
             "distance_meters": route.get("distanceMeters", 0),
             "duration_seconds": duration_seconds(
                 route.get("duration", "0s")
             ),
             "encoded_polyline": polyline,
-
-            # Instructions are added after route-level testing.
-            "instructions": []
+            "instructions": instructions
         }
 
     except HTTPException:
@@ -268,11 +303,11 @@ async def nearby_shops(lat: float, lng: float):
                     data={"data": query}
                 )
                 response.raise_for_status()
-                data = response.json()
+                result = response.json()
 
             places = []
 
-            for item in data.get("elements", []):
+            for item in result.get("elements", []):
                 tags = item.get("tags", {})
                 center = item.get("center", {})
 
@@ -307,5 +342,4 @@ async def nearby_shops(lat: float, lng: float):
     raise HTTPException(
         status_code=502,
         detail="Nearby places servers busy hain. Dobara try karo."
-    )
-    
+)
