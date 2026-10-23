@@ -69,7 +69,7 @@ async def get_route(data: RouteRequest):
         "units": "METRIC"
     }
 
-    headers = {
+   headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
         "X-Goog-FieldMask": (
@@ -80,7 +80,7 @@ async def get_route(data: RouteRequest):
             "routes.legs.steps.duration,"
             "routes.legs.steps.navigationInstruction.instructions,"
             "routes.legs.steps.navigationInstruction.maneuver,"
-            "routes.legs.steps.startLocation.latLng"
+            "routes.legs.steps.startLocation"
         )
     }
 
