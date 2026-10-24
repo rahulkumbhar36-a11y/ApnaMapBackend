@@ -9,12 +9,9 @@ GOOGLE_ROUTES_URL = (
     "https://routes.googleapis.com/directions/v2:computeRoutes"
 )
 
-OVERPASS_SERVERS = [
-    "https://overpass.private.coffee/api/interpreter",
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-]
+GOOGLE_PLACES_URL = (
+    "https://places.googleapis.com/v1/places:searchNearby"
+)
 
 
 class RouteRequest(BaseModel):
@@ -201,8 +198,7 @@ async def get_route(data: RouteRequest):
                     "duration_seconds": duration_seconds(
                         step.get("staticDuration", "0s")
                     ),
-                    # Backend sends [longitude, latitude].
-                    # Android LatLng needs latitude first.
+                    # [longitude, latitude]
                     "location": [
                         start_location.get("longitude", 0),
                         start_location.get("latitude", 0)
@@ -290,42 +286,23 @@ async def search_place(q: str):
 
 
 # =====================================
-# 3. NEARBY CATEGORY SEARCH
+# 3. NEARBY SEARCH USING GOOGLE PLACES
 # =====================================
-
-CATEGORY_FILTERS = {
+CATEGORY_TYPES = {
     "all": [
-        'nwr(around:{radius},{lat},{lng})["shop"];',
-        'nwr(around:{radius},{lat},{lng})'
-        '["amenity"~"pharmacy|restaurant|hospital|fuel|atm"];',
+        "hospital",
+        "atm",
+        "gas_station",
+        "restaurant",
+        "pharmacy",
+        "store"
     ],
-
-    "shops": [
-        'nwr(around:{radius},{lat},{lng})["shop"];',
-    ],
-
-    "hospital": [
-        'nwr(around:{radius},{lat},{lng})["amenity"="hospital"];',
-        'nwr(around:{radius},{lat},{lng})["healthcare"="hospital"];',
-    ],
-
-    "atm": [
-        'nwr(around:{radius},{lat},{lng})["amenity"="atm"];',
-    ],
-
-    "petrol_pump": [
-        'nwr(around:{radius},{lat},{lng})["amenity"="fuel"];',
-    ],
-
-    "restaurant": [
-        'nwr(around:{radius},{lat},{lng})'
-        '["amenity"~"restaurant|fast_food|cafe"];',
-    ],
-
-    "pharmacy": [
-        'nwr(around:{radius},{lat},{lng})["amenity"="pharmacy"];',
-        'nwr(around:{radius},{lat},{lng})["healthcare"="pharmacy"];',
-    ],
+    "shops": ["store"],
+    "hospital": ["hospital"],
+    "atm": ["atm"],
+    "petrol_pump": ["gas_station"],
+    "restaurant": ["restaurant"],
+    "pharmacy": ["pharmacy"],
 }
 
 
@@ -334,7 +311,7 @@ async def nearby_shops(
     lat: float,
     lng: float,
     category: str = Query(default="all"),
-    radius: int = Query(default=1500, ge=100, le=10000)
+    radius: int = Query(default=1500, ge=100, le=50000)
 ):
     if not (-90 <= lat <= 90 and -180 <= lng <= 180):
         raise HTTPException(
@@ -344,107 +321,139 @@ async def nearby_shops(
 
     category = category.strip().lower()
 
-    if category not in CATEGORY_FILTERS:
+    if category not in CATEGORY_TYPES:
         raise HTTPException(
             status_code=400,
             detail={
                 "message": "Unknown category",
-                "allowed_categories": list(CATEGORY_FILTERS.keys())
+                "allowed_categories": list(CATEGORY_TYPES.keys())
             }
         )
 
-    filter_lines = "\n      ".join(
-        item.format(
-            radius=radius,
-            lat=lat,
-            lng=lng
+    api_key = os.getenv("GOOGLE_PLACES_API_KEY")
+
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="GOOGLE_PLACES_API_KEY Render mein set nahi hai"
         )
-        for item in CATEGORY_FILTERS[category]
-    )
 
-    query = f"""
-    [out:json][timeout:25];
-    (
-      {filter_lines}
-    );
-    out center tags;
-    """
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "places.id,"
+            "places.displayName,"
+            "places.location,"
+            "places.primaryType,"
+            "places.formattedAddress"
+        )
+    }
 
-    for server in OVERPASS_SERVERS:
-        try:
-            async with httpx.AsyncClient(
-                timeout=15,
-                headers={
-                    "User-Agent": "ApnaMapIndia/1.0"
-                }
-            ) as client:
-                response = await client.post(
-                    server,
-                    data={"data": query}
-                )
-                response.raise_for_status()
-                result = response.json()
-
-            places = []
-            seen = set()
-
-            for item in result.get("elements", []):
-                tags = item.get("tags", {})
-                center = item.get("center", {})
-
-                place_lat = item.get(
-                    "lat", center.get("lat")
-                )
-                place_lng = item.get(
-                    "lon", center.get("lon")
-                )
-
-                if place_lat is None or place_lng is None:
-                    continue
-
-                unique_id = (
-                    item.get("type"),
-                    item.get("id")
-                )
-
-                if unique_id in seen:
-                    continue
-
-                seen.add(unique_id)
-
-                place_category = (
-                    tags.get("shop")
-                    or tags.get("amenity")
-                    or tags.get("healthcare")
-                    or "place"
-                )
-
-                places.append({
-                    "name": tags.get(
-                        "name",
-                        tags.get("brand", place_category)
-                    ),
-                    "latitude": float(place_lat),
-                    "longitude": float(place_lng),
-                    "category": place_category,
-                    "address": tags.get("addr:full", "")
-                })
-
-            return {
-                "category": category,
-                "radius_meters": radius,
-                "count": len(places),
-                "places": places
+    body = {
+        "includedTypes": CATEGORY_TYPES[category],
+        "maxResultCount": 20,
+        "rankPreference": "DISTANCE",
+        "locationRestriction": {
+            "circle": {
+                "center": {
+                    "latitude": lat,
+                    "longitude": lng
+                },
+                "radius": float(radius)
             }
+        }
+    }
 
-        except (httpx.HTTPError, ValueError) as error:
-            print(
-                "Nearby places server error:",
-                str(error)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                GOOGLE_PLACES_URL,
+                headers=headers,
+                json=body
             )
-            continue
 
-    raise HTTPException(
-        status_code=502,
-        detail="Nearby places servers busy hain. Dobara try karo."
-    )
+        if response.is_error:
+            # Detailed error appears in Render Logs.
+            print(
+                "Google Places API error:",
+                response.status_code,
+                response.text[:2000]
+            )
+
+            if response.status_code in (401, 403):
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Google Places access denied. "
+                        "API enablement, key restrictions aur "
+                        "billing check karo."
+                    )
+                )
+
+            if response.status_code == 429:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Google Places quota ya rate limit "
+                        "exceeded ho sakti hai."
+                    )
+                )
+
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Google Places search fail hui. "
+                    "Render Logs check karo."
+                )
+            )
+
+        result = response.json()
+        places = []
+
+        for item in result.get("places", []):
+            location = item.get("location", {})
+            display_name = item.get("displayName", {})
+
+            if (
+                "latitude" not in location
+                or "longitude" not in location
+            ):
+                continue
+
+            places.append({
+                "name": display_name.get(
+                    "text", "Nearby place"
+                ),
+                "latitude": location["latitude"],
+                "longitude": location["longitude"],
+                "category": item.get(
+                    "primaryType", category
+                ),
+                "address": item.get(
+                    "formattedAddress", ""
+                )
+            })
+
+        return {
+            "category": category,
+            "radius_meters": radius,
+            "count": len(places),
+            "places": places
+        }
+
+    except HTTPException:
+        raise
+
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail="Google Places API timeout ho gaya"
+        )
+
+    except (httpx.HTTPError, ValueError) as error:
+        print("Google Places connection error:", str(error))
+        raise HTTPException(
+            status_code=502,
+            detail="Google Places service se connection nahi hua"
+        )
