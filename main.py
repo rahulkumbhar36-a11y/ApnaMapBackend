@@ -372,7 +372,7 @@ async def nearby_shops(
     for server in OVERPASS_SERVERS:
         try:
             async with httpx.AsyncClient(
-                timeout=35,
+                timeout=15,
                 headers={
                     "User-Agent": "ApnaMapIndia/1.0"
                 }
