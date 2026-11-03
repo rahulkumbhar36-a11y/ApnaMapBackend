@@ -88,7 +88,12 @@ async def get_route(data: RouteRequest):
         },
         "travelMode": "DRIVE",
         "routingPreference": "TRAFFIC_AWARE",
-        "extraComputations": ["TRAFFIC_ON_POLYLINE"],
+
+        # Traffic-aware polyline data
+        "extraComputations": [
+            "TRAFFIC_ON_POLYLINE"
+        ],
+
         "computeAlternativeRoutes": False,
         "polylineEncoding": "ENCODED_POLYLINE",
         "languageCode": "hi-IN",
@@ -159,6 +164,7 @@ async def get_route(data: RouteRequest):
             )
 
         route = routes[0]
+
         polyline = route.get(
             "polyline", {}
         ).get("encodedPolyline")
@@ -207,13 +213,15 @@ async def get_route(data: RouteRequest):
                     ]
                 })
 
-        return {
-            traffic_intervals = route.get(
+        # Google traffic speed intervals
+        traffic_intervals = route.get(
             "travelAdvisory", {}
         ).get("speedReadingIntervals", [])
 
         return {
-            "distance_meters": route.get("distanceMeters", 0),
+            "distance_meters": route.get(
+                "distanceMeters", 0
+            ),
             "duration_seconds": duration_seconds(
                 route.get("duration", "0s")
             ),
@@ -380,7 +388,6 @@ async def nearby_shops(
             )
 
         if response.is_error:
-            # Detailed error appears in Render Logs.
             print(
                 "Google Places API error:",
                 response.status_code,
