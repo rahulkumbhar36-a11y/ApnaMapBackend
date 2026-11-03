@@ -88,6 +88,7 @@ async def get_route(data: RouteRequest):
         },
         "travelMode": "DRIVE",
         "routingPreference": "TRAFFIC_AWARE",
+        "extraComputations": ["TRAFFIC_ON_POLYLINE"],
         "computeAlternativeRoutes": False,
         "polylineEncoding": "ENCODED_POLYLINE",
         "languageCode": "hi-IN",
@@ -101,6 +102,7 @@ async def get_route(data: RouteRequest):
             "routes.distanceMeters,"
             "routes.duration,"
             "routes.polyline.encodedPolyline,"
+            "routes.travelAdvisory.speedReadingIntervals,"
             "routes.legs.steps.distanceMeters,"
             "routes.legs.steps.staticDuration,"
             "routes.legs.steps.navigationInstruction.instructions,"
@@ -206,13 +208,17 @@ async def get_route(data: RouteRequest):
                 })
 
         return {
-            "distance_meters": route.get(
-                "distanceMeters", 0
-            ),
+            traffic_intervals = route.get(
+            "travelAdvisory", {}
+        ).get("speedReadingIntervals", [])
+
+        return {
+            "distance_meters": route.get("distanceMeters", 0),
             "duration_seconds": duration_seconds(
                 route.get("duration", "0s")
             ),
             "encoded_polyline": polyline,
+            "traffic_intervals": traffic_intervals,
             "instructions": instructions
         }
 
