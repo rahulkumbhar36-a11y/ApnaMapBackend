@@ -1,9 +1,10 @@
 import os
 import httpx
+
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 
-app = FastAPI(title="Apna Map India Navigation")
+app = FastAPI(title="Apna Map India Smart Navigation")
 
 GOOGLE_ROUTES_URL = (
     "https://routes.googleapis.com/directions/v2:computeRoutes"
@@ -22,17 +23,26 @@ class RouteRequest(BaseModel):
 
 
 def duration_seconds(value):
-    """Convert Google's duration string, such as 120s, to seconds."""
+    """Convert Google's duration string to seconds."""
     return float(str(value or "0s").removesuffix("s") or 0)
 
 
 # =====================================
 # HOME
 # =====================================
+
 @app.get("/")
 def home():
     return {
-        "message": "Apna Map India Navigation Server is running",
+        "message": "Apna Map India Smart Navigation Server is running",
+        "features": [
+            "traffic_aware_navigation",
+            "alternative_routes",
+            "route_comparison",
+            "navigation_instructions",
+            "destination_search",
+            "nearby_places"
+        ],
         "nearby_categories": [
             "all",
             "shops",
@@ -40,16 +50,87 @@ def home():
             "atm",
             "petrol_pump",
             "restaurant",
-            "pharmacy",
-        ],
+            "pharmacy"
+        ]
     }
 
 
 # =====================================
-# 1. TRAFFIC-AWARE ROUTE + DIRECTIONS
+# ROUTE BUILDER
 # =====================================
+
+def build_route(route):
+
+    instructions = []
+
+    for leg in route.get("legs", []):
+        for step in leg.get("steps", []):
+
+            navigation = step.get(
+                "navigationInstruction", {}
+            )
+
+            start_location = step.get(
+                "startLocation", {}
+            ).get("latLng", {})
+
+            instruction_text = navigation.get(
+                "instructions", ""
+            )
+
+            if not instruction_text:
+                continue
+
+            instructions.append({
+                "instruction": instruction_text,
+                "maneuver": navigation.get(
+                    "maneuver",
+                    "MANEUVER_UNSPECIFIED"
+                ),
+                "distance_meters": step.get(
+                    "distanceMeters", 0
+                ),
+                "duration_seconds": duration_seconds(
+                    step.get("staticDuration", "0s")
+                ),
+                "location": [
+                    start_location.get("longitude", 0),
+                    start_location.get("latitude", 0)
+                ]
+            })
+
+    return {
+        "distance_meters": route.get(
+            "distanceMeters", 0
+        ),
+
+        "duration_seconds": duration_seconds(
+            route.get("duration", "0s")
+        ),
+
+        "encoded_polyline": route.get(
+            "polyline", {}
+        ).get("encodedPolyline", ""),
+
+        "traffic_intervals": route.get(
+            "travelAdvisory", {}
+        ).get("speedReadingIntervals", []),
+
+        "route_labels": route.get(
+            "routeLabels", []
+        ),
+
+        "instructions": instructions
+    }
+
+
+# =====================================
+# 1. SMART MULTIPLE ROUTES
+# =====================================
+
 @app.post("/route")
 async def get_route(data: RouteRequest):
+
     api_key = os.getenv("GOOGLE_ROUTES_API_KEY")
 
     if not api_key:
@@ -78,6 +159,7 @@ async def get_route(data: RouteRequest):
                 }
             }
         },
+
         "destination": {
             "location": {
                 "latLng": {
@@ -86,15 +168,16 @@ async def get_route(data: RouteRequest):
                 }
             }
         },
+
         "travelMode": "DRIVE",
         "routingPreference": "TRAFFIC_AWARE",
 
-        # Traffic-aware polyline data
         "extraComputations": [
             "TRAFFIC_ON_POLYLINE"
         ],
 
-        "computeAlternativeRoutes": False,
+        "computeAlternativeRoutes": True,
+
         "polylineEncoding": "ENCODED_POLYLINE",
         "languageCode": "hi-IN",
         "units": "METRIC"
@@ -103,9 +186,11 @@ async def get_route(data: RouteRequest):
     headers = {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": api_key,
+
         "X-Goog-FieldMask": (
             "routes.distanceMeters,"
             "routes.duration,"
+            "routes.routeLabels,"
             "routes.polyline.encodedPolyline,"
             "routes.travelAdvisory.speedReadingIntervals,"
             "routes.legs.steps.distanceMeters,"
@@ -117,7 +202,9 @@ async def get_route(data: RouteRequest):
     }
 
     try:
+
         async with httpx.AsyncClient(timeout=30) as client:
+
             response = await client.post(
                 GOOGLE_ROUTES_URL,
                 json=body,
@@ -125,6 +212,7 @@ async def get_route(data: RouteRequest):
             )
 
         if response.is_error:
+
             print(
                 "Google Routes API error:",
                 response.status_code,
@@ -134,19 +222,22 @@ async def get_route(data: RouteRequest):
             if response.status_code == 400:
                 raise HTTPException(
                     status_code=502,
-                    detail=(
-                        "Google Routes request invalid hai. "
-                        "Render Logs mein Google error check karo."
-                    )
+                    detail="Google Routes request invalid hai"
                 )
 
             if response.status_code in (401, 403):
                 raise HTTPException(
                     status_code=502,
                     detail=(
-                        "Google API key, Routes API access, "
-                        "billing ya restrictions check karo."
+                        "Google API key, Routes API access "
+                        "ya billing check karo"
                     )
+                )
+
+            if response.status_code == 429:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Google Routes quota limit ho sakti hai"
                 )
 
             raise HTTPException(
@@ -155,6 +246,7 @@ async def get_route(data: RouteRequest):
             )
 
         result = response.json()
+
         routes = result.get("routes", [])
 
         if not routes:
@@ -163,71 +255,32 @@ async def get_route(data: RouteRequest):
                 detail="Driving route nahi mila"
             )
 
-        route = routes[0]
+        route_data = [
+            build_route(route)
+            for route in routes
+        ]
 
-        polyline = route.get(
-            "polyline", {}
-        ).get("encodedPolyline")
-
-        if not polyline:
-            raise HTTPException(
-                status_code=502,
-                detail="Google response mein route polyline nahi mila"
-            )
-
-        instructions = []
-
-        for leg in route.get("legs", []):
-            for step in leg.get("steps", []):
-                navigation = step.get(
-                    "navigationInstruction", {}
-                )
-
-                start_location = step.get(
-                    "startLocation", {}
-                ).get("latLng", {})
-
-                instruction_text = navigation.get(
-                    "instructions", ""
-                )
-
-                if not instruction_text:
-                    continue
-
-                instructions.append({
-                    "instruction": instruction_text,
-                    "maneuver": navigation.get(
-                        "maneuver",
-                        "MANEUVER_UNSPECIFIED"
-                    ),
-                    "distance_meters": step.get(
-                        "distanceMeters", 0
-                    ),
-                    "duration_seconds": duration_seconds(
-                        step.get("staticDuration", "0s")
-                    ),
-                    # [longitude, latitude]
-                    "location": [
-                        start_location.get("longitude", 0),
-                        start_location.get("latitude", 0)
-                    ]
-                })
-
-        # Google traffic speed intervals
-        traffic_intervals = route.get(
-            "travelAdvisory", {}
-        ).get("speedReadingIntervals", [])
+        main_route = route_data[0]
 
         return {
-            "distance_meters": route.get(
-                "distanceMeters", 0
-            ),
-            "duration_seconds": duration_seconds(
-                route.get("duration", "0s")
-            ),
-            "encoded_polyline": polyline,
-            "traffic_intervals": traffic_intervals,
-            "instructions": instructions
+
+            # OLD ANDROID APP FIELDS
+            "distance_meters": main_route["distance_meters"],
+
+            "duration_seconds": main_route["duration_seconds"],
+
+            "encoded_polyline": main_route["encoded_polyline"],
+
+            "traffic_intervals": main_route["traffic_intervals"],
+
+            "instructions": main_route["instructions"],
+
+            # NEW SMART ROUTE FEATURES
+            "route_labels": main_route["route_labels"],
+
+            "alternative_routes": route_data[1:],
+
+            "total_routes": len(route_data)
         }
 
     except HTTPException:
@@ -240,7 +293,12 @@ async def get_route(data: RouteRequest):
         )
 
     except httpx.HTTPError as error:
-        print("Route connection error:", str(error))
+
+        print(
+            "Route connection error:",
+            str(error)
+        )
+
         raise HTTPException(
             status_code=502,
             detail="Google Routes service se connection nahi hua"
@@ -250,8 +308,10 @@ async def get_route(data: RouteRequest):
 # =====================================
 # 2. DESTINATION SEARCH API
 # =====================================
+
 @app.get("/search-place")
 async def search_place(q: str):
+
     q = q.strip()
 
     if not q:
@@ -261,21 +321,26 @@ async def search_place(q: str):
         )
 
     try:
+
         async with httpx.AsyncClient(
             timeout=40,
             headers={
                 "User-Agent": "ApnaMapIndia/1.0"
             }
         ) as client:
+
             response = await client.get(
                 "https://nominatim.openstreetmap.org/search",
+
                 params={
                     "q": q,
                     "format": "jsonv2",
                     "limit": 1
                 }
             )
+
             response.raise_for_status()
+
             results = response.json()
 
         if not results:
@@ -285,14 +350,27 @@ async def search_place(q: str):
 
         return {
             "places": [{
-                "name": place.get("display_name", q),
+                "name": place.get(
+                    "display_name", q
+                ),
+
                 "latitude": float(place["lat"]),
+
                 "longitude": float(place["lon"])
             }]
         }
 
-    except (httpx.HTTPError, ValueError, KeyError) as error:
-        print("Place search error:", str(error))
+    except (
+        httpx.HTTPError,
+        ValueError,
+        KeyError
+    ) as error:
+
+        print(
+            "Place search error:",
+            str(error)
+        )
+
         raise HTTPException(
             status_code=502,
             detail="Destination search service busy hai"
@@ -302,7 +380,9 @@ async def search_place(q: str):
 # =====================================
 # 3. NEARBY SEARCH USING GOOGLE PLACES
 # =====================================
+
 CATEGORY_TYPES = {
+
     "all": [
         "hospital",
         "atm",
@@ -311,23 +391,41 @@ CATEGORY_TYPES = {
         "pharmacy",
         "store"
     ],
+
     "shops": ["store"],
+
     "hospital": ["hospital"],
+
     "atm": ["atm"],
+
     "petrol_pump": ["gas_station"],
+
     "restaurant": ["restaurant"],
-    "pharmacy": ["pharmacy"],
+
+    "pharmacy": ["pharmacy"]
 }
 
 
 @app.get("/nearby-shops")
 async def nearby_shops(
+
     lat: float,
+
     lng: float,
+
     category: str = Query(default="all"),
-    radius: int = Query(default=1500, ge=100, le=50000)
+
+    radius: int = Query(
+        default=1500,
+        ge=100,
+        le=50000
+    )
 ):
-    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+
+    if not (
+        -90 <= lat <= 90
+        and -180 <= lng <= 180
+    ):
         raise HTTPException(
             status_code=400,
             detail="Latitude ya longitude galat hai"
@@ -336,25 +434,32 @@ async def nearby_shops(
     category = category.strip().lower()
 
     if category not in CATEGORY_TYPES:
+
         raise HTTPException(
             status_code=400,
             detail={
                 "message": "Unknown category",
-                "allowed_categories": list(CATEGORY_TYPES.keys())
+                "allowed_categories": list(
+                    CATEGORY_TYPES.keys()
+                )
             }
         )
 
     api_key = os.getenv("GOOGLE_PLACES_API_KEY")
 
     if not api_key:
+
         raise HTTPException(
             status_code=500,
             detail="GOOGLE_PLACES_API_KEY Render mein set nahi hai"
         )
 
     headers = {
+
         "Content-Type": "application/json",
+
         "X-Goog-Api-Key": api_key,
+
         "X-Goog-FieldMask": (
             "places.id,"
             "places.displayName,"
@@ -365,22 +470,31 @@ async def nearby_shops(
     }
 
     body = {
+
         "includedTypes": CATEGORY_TYPES[category],
+
         "maxResultCount": 20,
+
         "rankPreference": "DISTANCE",
+
         "locationRestriction": {
+
             "circle": {
+
                 "center": {
                     "latitude": lat,
                     "longitude": lng
                 },
+
                 "radius": float(radius)
             }
         }
     }
 
     try:
+
         async with httpx.AsyncClient(timeout=30) as client:
+
             response = await client.post(
                 GOOGLE_PLACES_URL,
                 headers=headers,
@@ -388,6 +502,7 @@ async def nearby_shops(
             )
 
         if response.is_error:
+
             print(
                 "Google Places API error:",
                 response.status_code,
@@ -395,16 +510,18 @@ async def nearby_shops(
             )
 
             if response.status_code in (401, 403):
+
                 raise HTTPException(
                     status_code=502,
                     detail=(
                         "Google Places access denied. "
-                        "API enablement, key restrictions aur "
-                        "billing check karo."
+                        "API enablement, key restrictions "
+                        "aur billing check karo."
                     )
                 )
 
             if response.status_code == 429:
+
                 raise HTTPException(
                     status_code=502,
                     detail=(
@@ -422,11 +539,16 @@ async def nearby_shops(
             )
 
         result = response.json()
+
         places = []
 
         for item in result.get("places", []):
+
             location = item.get("location", {})
-            display_name = item.get("displayName", {})
+
+            display_name = item.get(
+                "displayName", {}
+            )
 
             if (
                 "latitude" not in location
@@ -435,23 +557,32 @@ async def nearby_shops(
                 continue
 
             places.append({
+
                 "name": display_name.get(
                     "text", "Nearby place"
                 ),
+
                 "latitude": location["latitude"],
+
                 "longitude": location["longitude"],
+
                 "category": item.get(
                     "primaryType", category
                 ),
+
                 "address": item.get(
                     "formattedAddress", ""
                 )
             })
 
         return {
+
             "category": category,
+
             "radius_meters": radius,
+
             "count": len(places),
+
             "places": places
         }
 
@@ -459,13 +590,22 @@ async def nearby_shops(
         raise
 
     except httpx.TimeoutException:
+
         raise HTTPException(
             status_code=504,
             detail="Google Places API timeout ho gaya"
         )
 
-    except (httpx.HTTPError, ValueError) as error:
-        print("Google Places connection error:", str(error))
+    except (
+        httpx.HTTPError,
+        ValueError
+    ) as error:
+
+        print(
+            "Google Places connection error:",
+            str(error)
+        )
+
         raise HTTPException(
             status_code=502,
             detail="Google Places service se connection nahi hua"
